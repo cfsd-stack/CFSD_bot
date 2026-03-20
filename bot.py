@@ -1,78 +1,104 @@
-# bot.py - DEBUG VERSION
+# bot.py 
 import os
 import logging
 import asyncio
+from flask import Flask, request
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from dotenv import load_dotenv
+from courses_config import COURSES, WELCOME_MESSAGE, NOT_FOUND_MESSAGE
 
-# Load environment variables
 load_dotenv()
 
-# Configuration
 TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 8080))
 
-# Logging - MORE VERBOSE
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG  # Changed to DEBUG
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-logger.debug(f"TOKEN loaded: {'Yes' if TOKEN else 'No'}")
-logger.debug(f"WEBHOOK_URL: {WEBHOOK_URL}")
-logger.debug(f"PORT: {PORT}")
-
-# Build bot application
-try:
-    app = Application.builder().token(TOKEN).build()
-    logger.info("✅ Application built successfully")
-except Exception as e:
-    logger.error(f"❌ Failed to build application: {e}")
-    raise
+# Build app
+app = Application.builder().token(TOKEN).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Debug start handler"""
-    logger.info(f"📩 /start received from user {update.effective_user.id}")
-    
     user = update.effective_user
     args = context.args
     
-    logger.debug(f"User: {user.first_name}, Args: {args}")
+    logger.info(f"📩 /start from user {user.id}, args: {args}")
     
-    try:
-        if not args:
-            await update.message.reply_text("👋 Bot is working! Send /start python101 to test.")
-            logger.info("✅ Welcome message sent")
-        else:
-            await update.message.reply_text(f"📦 You requested: {args[0]}")
-            logger.info(f"✅ Course request sent: {args[0]}")
-    except Exception as e:
-        logger.error(f"❌ Failed to send message: {e}")
-        await update.message.reply_text("❌ Error occurred. Check logs.")
+    if not args:
+        await update.message.reply_text(
+            WELCOME_MESSAGE.format(first_name=user.first_name),
+            parse_mode='Markdown'
+        )
+        return
+    
+    course_id = args[0]
+    if course_id in COURSES:
+        course = COURSES[course_id]
+        await update.message.reply_text(f"📦 Sending: {course['title']}...")
+        
+        # Send first 5 links as example (expand as needed)
+        for part in course['parts'][:5]:
+            await update.message.reply_text(
+                f"📥 [Part {part['num']}: {part['name']} ({part['size']})]({part['url']})",
+                parse_mode='Markdown'
+            )
+        
+        if len(course['parts']) > 5:
+            await update.message.reply_text(
+                f"⚠️ Showing 5 of {len(course['parts'])} parts. Visit website for all links."
+            )
+    else:
+        await update.message.reply_text(NOT_FOUND_MESSAGE, parse_mode='Markdown')
 
-async def post_init(application: Application):
-    """Set webhook on startup"""
-    if WEBHOOK_URL:
-        try:
-            await application.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
-            logger.info(f"✅ Webhook set to: {WEBHOOK_URL}/webhook")
-        except Exception as e:
-            logger.error(f"❌ Failed to set webhook: {e}")
+async def courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = "*📚 Available Courses:*\n\n"
+    for cid, info in COURSES.items():
+        link = f"https://t.me/{context.bot.username}?start={cid}"
+        text += f"• *{info['title']}*\n  [Get Links]({link})\n\n"
+    await update.message.reply_text(text, parse_mode='Markdown')
 
 # Register handlers
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("courses", lambda u, c: u.message.reply_text("Courses command works!")))
+app.add_handler(CommandHandler("courses", courses))
+
+# Flask webhook server
+flask_app = Flask(__name__)
+
+@flask_app.route('/webhook', methods=['POST'])
+async def webhook():
+    update = Update.de_flask(request.get_json())
+    await app.process_update(update)
+    return 'OK'
+
+@flask_app.route('/')
+def health():
+    return '🤖 CFSD Bot is running!'
+
+async def setup_webhook():
+    """Set webhook before Flask starts"""
+    if WEBHOOK_URL:
+        await app.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+        logger.info(f"✅ Webhook set: {WEBHOOK_URL}/webhook")
 
 if __name__ == '__main__':
-    logger.info("🚀 Starting bot...")
+    logger.info("🚀 Starting CFSD Bot (Webhook Mode)...")
     
-    if WEBHOOK_URL:
-        # Webhook mode (needs Flask)
-        logger.warning("⚠️ Webhook mode requires Flask. Switching to polling for debug.")
-        app.run_polling(allowed_updates=Update.ALL_TYPES)
-    else:
-        # Polling mode (simpler)
-        app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Run setup + Flask in async context
+    async def run():
+        await setup_webhook()
+        # Run Flask in executor to not block asyncio
+        import threading
+        def run_flask():
+            flask_app.run(host='0.0.0.0', port=PORT)
+        thread = threading.Thread(target=run_flask, daemon=True)
+        thread.start()
+        # Keep alive
+        while True:
+            await asyncio.sleep(3600)
+    
+    asyncio.run(run())
